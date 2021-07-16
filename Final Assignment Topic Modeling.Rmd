@@ -1,0 +1,153 @@
+
+```{r}
+library(gutenbergr)
+library(tidytext)
+#Invoke the required library packages
+library(ggplot2)
+library(tidyverse)
+library(stm)
+library(topicmodels)
+library(stringr)
+library(janitor)
+library(wordcloud)
+```
+```{r}
+three_book_collection<- gutenberg_download(c(164, 36, 768), meta_fields = "title")
+head(three_book_collection)
+```
+```{r}
+# divide into documents, each representing one chapter
+by_chapter <- three_book_collection %>%
+  group_by(title) %>%
+  mutate(chapter = cumsum(str_detect(text, regex("^chapter", ignore_case = TRUE)))) %>%
+  ungroup() %>%
+  filter(chapter > 0) %>%
+  unite(document, title, chapter)
+```
+```{r}
+# split into words
+by_chapter_word <- by_chapter %>%
+  unnest_tokens(word, text)
+
+# find document-word counts
+word_counts <- by_chapter_word %>%
+  anti_join(stop_words) %>%
+  count(document, word, sort = TRUE) %>%
+  ungroup()
+
+word_counts
+```
+```{r}
+#Creating the Document Term Matrix (DTM)
+chapters_dtm <- word_counts %>%
+  cast_dtm(document, word, n)
+
+chapters_dtm
+```
+```{r}
+#Use LDA to create a 3-topic model
+chapters_lda <- LDA(chapters_dtm, k = 3, control = list(seed = 123))
+chapters_lda
+```
+```{r}
+# examine per-topic-per-word probabilities
+chapter_topics <- tidy(chapters_lda, matrix = "beta")
+chapter_topics
+```
+```{r}
+#finding top 5 terms within each topic
+top_terms <- chapter_topics %>%
+  group_by(topic) %>%
+  top_n(5, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+top_terms
+```
+```{r}
+#creating visualizatio with ggplot2
+
+top_terms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered()
+```
+```{r}
+#Determine which topics are closest in their association with each document using the “gamma” parameter
+chapters_gamma <- tidy(chapters_lda, matrix = "gamma")
+chapters_gamma
+dim(chapters_gamma)
+```
+```{r}
+#Separate the document name into title and chapter using the separate function
+chapters_gamma <- chapters_gamma %>%
+  separate(document, c("title", "chapter"), sep = "_", convert = TRUE)
+
+chapters_gamma
+```
+```{r}
+#ggplot2 to visualize the per-document-per-topic probability for each topic.
+chapters_gamma %>%
+  mutate(title = reorder(title, gamma * topic)) %>%
+  ggplot(aes(factor(topic), gamma)) +
+  geom_boxplot() +
+  facet_wrap(~ title) +
+  labs(x = "topic", y = expression(gamma))
+```
+```{r}
+#Take the chapters_gamma dataframe and group it by title and chapter and then use the slice_max function selects the rows with the highest values of the gamma variable.
+chapter_classifications <- chapters_gamma %>%
+  group_by(title, chapter) %>%
+  slice_max(gamma) %>%
+  ungroup()
+
+chapter_classifications
+```
+```{r}
+#Develop the “consensus” topic for each book
+book_topics <- chapter_classifications %>%
+  count(title, topic) %>%
+  group_by(title) %>%
+  top_n(1, n) %>%
+  ungroup() %>%
+  transmute(consensus = title, topic)
+
+chapter_classifications %>%
+  inner_join(book_topics, by = "topic") %>%
+  filter(title != consensus)
+```
+```{r}
+#Use the augment function to develop the words assignment for each topic
+assignments <- augment(chapters_lda, data = chapters_dtm)
+assignments
+```
+```{r}
+assignments <- assignments %>%
+  separate(document, c("title", "chapter"), 
+           sep = "_", convert = TRUE) %>%
+  inner_join(book_topics, by = c(".topic" = "topic"))
+
+assignments
+```
+```{r}
+library(scales)
+
+assignments %>%
+  count(title, consensus, wt = count) %>%
+  mutate(across(c(title, consensus), ~str_wrap(., 20))) %>%
+  group_by(title) %>%
+  mutate(percent = n / sum(n)) %>%
+  ggplot(aes(consensus, title, fill = percent)) +
+  geom_tile() +
+  scale_fill_gradient2(high = "darkred", label = percent_format()) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        panel.grid = element_blank()) +
+  labs(x = "Book words were assigned to",
+       y = "Book words came from",
+       fill = "% of assignments")
+
+```
+
